@@ -20,5 +20,9 @@
   "homepage": "https://github.com/MayankB321/fit3179-dv-2-datasets#readme",
   "devDependencies": {
     "d3-dsv": "^3.0.1"
+  },
+  "dependencies": {
+    "d3-geo": "^3.1.1",
+    "topojson-client": "^3.1.0"
   }
 }
