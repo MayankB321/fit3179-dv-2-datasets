@@ -1,0 +1,24 @@
+{
+  "name": "fit3179-dv-2-datasets",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MayankB321/fit3179-dv-2-datasets.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/MayankB321/fit3179-dv-2-datasets/issues"
+  },
+  "homepage": "https://github.com/MayankB321/fit3179-dv-2-datasets#readme",
+  "devDependencies": {
+    "d3-dsv": "^3.0.1"
+  }
+}
