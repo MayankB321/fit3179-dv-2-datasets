@@ -20,9 +20,13 @@ import sys
 import pandas as pd
 import requests
 from pyproj import Transformer
-from shapely.geometry import shape, mapping
+from shapely.geometry import shape, mapping, Point, Polygon, MultiPolygon, GeometryCollection
 from shapely.affinity import scale as scale_geometry
 from shapely.ops import transform as transform_geometry
+try:
+    from shapely import make_valid
+except ImportError:  # Compatibility with older Shapely releases
+    make_valid = None
 
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "datasets" / "Tennis" / "tennis_players_by_country.csv"
@@ -35,6 +39,45 @@ WORLD_URL = (
 # Mollweide is an equal-area projection, so polygon areas can be compared.
 TO_EQUAL_AREA = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True).transform
 TO_LONLAT = Transformer.from_crs("ESRI:54009", "EPSG:4326", always_xy=True).transform
+
+# Mollweide's valid world extent is approximately an ellipse. Enlarged country
+# polygons can extend beyond the projection domain; inverse-projecting those
+# coordinates can yield Infinity, which is illegal in GeoJSON. Clip slightly
+# inside the ellipse before converting back to longitude/latitude.
+WORLD_CLIP = scale_geometry(
+    Point(0, 0).buffer(1, quad_segs=256),
+    xfact=18000000, yfact=8990000, origin=(0, 0)
+)
+
+
+def repair_polygonal(geom):
+    """Repair invalid geometry and keep only polygonal components."""
+    if geom is None or geom.is_empty:
+        return Polygon()
+    if not geom.is_valid:
+        if make_valid is not None:
+            geom = make_valid(geom)
+        else:
+            # buffer(0) is a practical fallback for older Shapely versions.
+            geom = geom.buffer(0)
+
+    if isinstance(geom, (Polygon, MultiPolygon)):
+        return geom
+    if isinstance(geom, GeometryCollection):
+        polygons = []
+        for part in geom.geoms:
+            if isinstance(part, Polygon) and not part.is_empty:
+                polygons.append(part)
+            elif isinstance(part, MultiPolygon):
+                polygons.extend(p for p in part.geoms if not p.is_empty)
+        if not polygons:
+            return Polygon()
+        from shapely.ops import unary_union
+        merged = unary_union(polygons)
+        if not merged.is_valid:
+            merged = make_valid(merged) if make_valid is not None else merged.buffer(0)
+        return merged
+    return Polygon()
 
 
 def get_iso3(properties):
@@ -72,8 +115,13 @@ def main():
         iso3 = get_iso3(feature.get("properties", {}))
         if iso3 not in counts or counts[iso3] <= 0:
             continue
-        geom = transform_geometry(TO_EQUAL_AREA, shape(feature["geometry"]))
-        if geom.is_empty or geom.area <= 0:
+        # Repair Natural Earth polygons before projection; projection and
+        # later intersections are much more reliable with valid input geometry.
+        geom = repair_polygonal(shape(feature["geometry"]))
+        if geom.is_empty:
+            continue
+        geom = repair_polygonal(transform_geometry(TO_EQUAL_AREA, geom))
+        if geom.is_empty or not geom.is_valid or geom.area <= 0:
             continue
         matched.append((iso3, geom, feature.get("properties", {})))
 
@@ -91,8 +139,25 @@ def main():
         target_area = counts[code] * target_area_per_player
         factor = (target_area / geom.area) ** 0.5
         centroid = geom.centroid
-        resized = scale_geometry(geom, xfact=factor, yfact=factor, origin=centroid)
+        resized = repair_polygonal(
+            scale_geometry(geom, xfact=factor, yfact=factor, origin=centroid)
+        )
+        # Repair both operands before intersection to avoid GEOS topology errors.
+        clip = repair_polygonal(WORLD_CLIP)
+        try:
+            resized = repair_polygonal(resized.intersection(clip))
+        except Exception as exc:
+            # A final zero-width buffer can resolve occasional GEOS side-location
+            # conflicts caused by tiny boundary defects in source polygons.
+            print(f"Retrying intersection for {code} after geometry repair: {exc}")
+            resized = repair_polygonal(resized.buffer(0).intersection(clip.buffer(0)))
+        if resized.is_empty:
+            print(f"Skipping {code}: geometry fell outside projection bounds")
+            continue
         resized_lonlat = transform_geometry(TO_LONLAT, resized)
+        # Projection edge cases must never leak non-finite coordinates into JSON.
+        if not resized_lonlat.is_valid:
+            resized_lonlat = repair_polygonal(resized_lonlat)
         row = rows[code]
         props = {
             "country_code": code,
@@ -106,7 +171,7 @@ def main():
 
     output = {"type": "FeatureCollection", "name": "tennis_players_cartogram", "features": features}
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(output, separators=(",", ":")), encoding="utf-8")
+    OUT_PATH.write_text(json.dumps(output, separators=(",", ":"), allow_nan=False), encoding="utf-8")
     print(f"Wrote {len(features)} countries to: {OUT_PATH}")
     print("Country polygon area is now proportional to ATP player_count.")
     if missing_codes:
